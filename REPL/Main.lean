@@ -116,8 +116,13 @@ def ppTactic (ctx : ContextInfo) (stx : Syntax) : IO Format :=
   catch _ =>
     pure "<failed to pretty print>"
 
-def tactics (trees : List InfoTree) : M m (List Tactic) :=
-  trees.flatMap InfoTree.tactics |>.mapM
+def tactics (env : Environment) (trees : Array InfoTree) : M (IO) (Array Tactic) := do
+  let processedTrees ← trees.flatMapM (fun t => do
+    let out := (t.tacticsM.run' {}).run' {fileName := "", fileMap := default} {env := env}
+    match ← out.toIO' with
+    | .ok out => return out
+    | .error e => IO.throwServerError <| ← e.toMessageData.toString)
+  processedTrees.mapM
     fun ⟨ctx, stx, goals, pos, endPos, ns⟩ => do
       let proofState := some (← ProofSnapshot.create ctx none none goals)
       let goals := s!"{(← ctx.ppGoals goals)}".trim
@@ -187,7 +192,7 @@ def unpickleProofSnapshot (n : UnpickleProofState) : M IO (ProofStepResponse ⊕
 /--
 Run a command, returning the id of the new environment, and any messages and sorries.
 -/
-def runCommand (s : Command) : M IO (CommandResponse ⊕ Error) := do
+def runCommand (s : Command) : M (IO) (CommandResponse ⊕ Error) := do
   let (cmdSnapshot?, notFound) ← do match s.env with
   | none => pure (none, false)
   | some i => do match (← get).cmdStates[i]? with
@@ -205,7 +210,9 @@ def runCommand (s : Command) : M IO (CommandResponse ⊕ Error) := do
   -- trees.forM fun t => do IO.println (← t.format)
   let sorries ← sorries trees (initialCmdState?.map (·.env))
   let tactics ← match s.allTactics with
-  | some true => tactics trees
+  | some true => do
+    let result ← tactics cmdState.env trees.toArray
+    pure result.toList
   | _ => pure []
   let cmdSnapshot :=
   { cmdState

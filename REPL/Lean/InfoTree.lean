@@ -160,6 +160,17 @@ partial def findAllInfo (t : InfoTree) (ctx? : Option ContextInfo) (p : Info →
     info ++ rest
   | _ => []
 
+/-- Analogue of `Lean.Elab.InfoTree.findInfo?`, but that returns all results. -/
+partial def findAllInfoM [Monad M] (t : InfoTree) (ctx? : Option ContextInfo) (p : Info → M Bool) :
+    M (Array (Info × Option ContextInfo)) := do
+  match t with
+  | context ctx t => t.findAllInfoM (ctx.mergeIntoOuter? ctx?) p
+  | node i ts  =>
+    let info := if ← p i then #[(i, ctx?)] else #[]
+    let rest ← ts.toArray.flatMapM (fun t => t.findAllInfoM ctx? p)
+    return info ++ rest
+  | _ => return #[]
+
 /-- Return all `TacticInfo` nodes in an `InfoTree` with "original" syntax,
 each equipped with its relevant `ContextInfo`. -/
 def findTacticNodes (t : InfoTree) : List (TacticInfo × ContextInfo) :=
@@ -168,6 +179,21 @@ def findTacticNodes (t : InfoTree) : List (TacticInfo × ContextInfo) :=
   | _ => false
   infos.filterMap fun p => match p with
   | (.ofTacticInfo i, some ctx) => (i, ctx)
+  | _ => none
+
+/-- Return all `TacticInfo` nodes in an `InfoTree` with "original" syntax,
+each equipped with its relevant `ContextInfo`. -/
+def findTacticTermNodes (t : InfoTree) : MetaM (Array ((TacticInfo ⊕ TermInfo) × ContextInfo)) := do
+  let infos ← t.findAllInfoM (M := MetaM) none fun i => match i with
+  | .ofTacticInfo i' => return i.isOriginal && i'.isSubstantive
+  | .ofTermInfo i' =>
+    match i'.expectedType? with
+    | some expr => isProp expr
+    | none => return False
+  | _ => return false
+  return infos.filterMap fun p => match p with
+  | (.ofTacticInfo i, some ctx) => some (Sum.inl i, ctx)
+  | (.ofTermInfo i, some ctx) => some (Sum.inr i, ctx)
   | _ => none
 
 /-- Return all `TacticInfo` nodes in an `InfoTree`
@@ -214,14 +240,35 @@ def sorries (t : InfoTree) : List (ContextInfo × SorryType × Position × Posit
 
 def tactics (t : InfoTree) : List (ContextInfo × Syntax × List MVarId × Position × Position × Array Name) :=
     -- HACK: creating a child ngen
-  t.findTacticNodes.map fun ⟨i, ctx⟩ => 
-    let range := stxRange ctx.fileMap i.stx 
-    ( { ctx with mctx := i.mctxBefore, ngen := ctx.ngen.mkChild.1 }, 
-      i.stx, 
-      i.goalsBefore, 
-      range.fst, 
-      range.snd, 
+  t.findTacticNodes.map fun ⟨i, ctx⟩ =>
+    let range := stxRange ctx.fileMap i.stx
+    ( { ctx with mctx := i.mctxBefore, ngen := ctx.ngen.mkChild.1 },
+      i.stx,
+      i.goalsBefore,
+      range.fst,
+      range.snd,
       i.getUsedConstantsAsSet.toArray )
+
+def tacticsM (t : InfoTree) : MetaM (Array (ContextInfo × Syntax × List MVarId × Position × Position × Array Name)) := do
+    -- HACK: creating a child ngen
+  return (← t.findTacticTermNodes).map fun ⟨i, ctx⟩ =>
+    match i with
+    | .inl i =>
+      let range := stxRange ctx.fileMap i.stx
+      ( { ctx with mctx := i.mctxBefore, ngen := ctx.ngen.mkChild.1 },
+        i.stx,
+        i.goalsBefore,
+        range.fst,
+        range.snd,
+        i.getUsedConstantsAsSet.toArray )
+    | .inr i =>
+      let range := stxRange ctx.fileMap i.stx
+      ( { ctx with ngen := ctx.ngen.mkChild.1 },
+        i.stx,
+        [],
+        range.fst,
+        range.snd,
+        #[] )
 
 
 end Lean.Elab.InfoTree
