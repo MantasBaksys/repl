@@ -188,7 +188,7 @@ def findTacticTermNodes (t : InfoTree) : MetaM (Array ((TacticInfo ⊕ TermInfo)
   | .ofTacticInfo i' => return i.isOriginal && i'.isSubstantive
   | .ofTermInfo i' =>
     match i'.expectedType? with
-    | some expr => isProp expr
+    | some expr => try isProp expr catch _ => return false
     | none => return False
   | _ => return false
   return infos.filterMap fun p => match p with
@@ -250,22 +250,26 @@ def tactics (t : InfoTree) : List (ContextInfo × Syntax × List MVarId × Posit
       i.getUsedConstantsAsSet.toArray )
 
 def tacticsM (t : InfoTree) : MetaM (Array (ContextInfo × Syntax × List MVarId × Position × Position × Array Name)) := do
-    -- HACK: creating a child ngen
-  return (← t.findTacticTermNodes).map fun ⟨i, ctx⟩ =>
+    -- creating a fake goal from a term
+  (← t.findTacticTermNodes).mapM fun ⟨i, ctx⟩ =>
     match i with
     | .inl i =>
       let range := stxRange ctx.fileMap i.stx
-      ( { ctx with mctx := i.mctxBefore, ngen := ctx.ngen.mkChild.1 },
+      return ( { ctx with mctx := i.mctxBefore, ngen := ctx.ngen.mkChild.1 },
         i.stx,
         i.goalsBefore,
         range.fst,
         range.snd,
         i.getUsedConstantsAsSet.toArray )
-    | .inr i =>
+    | .inr i => do
+      let type ← inferType i.expr
+      let goalMvar ← mkFreshExprMVar type
+      let newMctx := MetavarContext.addExprMVarDecl ctx.mctx goalMvar.mvarId! .anonymous {} {} type
       let range := stxRange ctx.fileMap i.stx
-      ( { ctx with ngen := ctx.ngen.mkChild.1 },
+      return ( { ctx with mctx := newMctx, ngen := ctx.ngen.mkChild.1 },
         i.stx,
-        [],
+        -- return the goal before
+        [goalMvar.mvarId!],
         range.fst,
         range.snd,
         #[] )
